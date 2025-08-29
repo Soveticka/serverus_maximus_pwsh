@@ -1,103 +1,78 @@
-# --- Serverus Maximus Profile Copy Script (fixed) ---
+<# 
+.SYNOPSIS
+  Copy selected Minecraft profile assets from an "old" profile to a "new" profile.
 
-# Allow script execution for this process only
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+.DESCRIPTION
+  - Designed for end users. Explains and (optionally) bypasses Execution Policy safely at the process level.
+  - Supports two launchers with different discovery flows:
+      1) Modrinth: finds profiles containing "Serverus Maximus" and determines source/destination by the presence of "1.0.0" in the folder name.
+      2) SkLauncher: asks the user for two absolute paths; decides which is OLD vs NEW by checking for the ".fabric" folder.
+         NOTE (as per request): If a profile path DOES NOT contain a ".fabric" folder, it's considered the OLD profile.
+  - Copies these items: 
+        "Distant_Horizons_server_data", "config", "saves", "schematics",
+        "xaero", "shaderpacks", "resourcepacks", "options.txt"
+  - Uses Robocopy for directories (robust merge; retries; keeps timestamps) and Copy-Item for single files.
 
-# Set output to UTF-8 for ✓/✗ symbols
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+.EXECUTION POLICY INFO
+  PowerShell's Execution Policy is a safety feature controlling script execution.
+  This script offers to relaunch itself with a temporary, process-only bypass (-ExecutionPolicy Bypass).
+  Nothing is permanently changed on your system.
 
-$tick  = [char]0x2714  # ✓
-$cross = [char]0x2716  # ✖
+.NOTES
+  Run this script with standard user rights.
+  Tested on Windows PowerShell 5.1 and PowerShell 7+.
 
-Write-Host "=== Serverus Maximus Profile Copy Script ===" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "This script will copy profile data between two folders." -ForegroundColor White
-Write-Host "It will automatically detect which folder is the source (old) and which is destination (new)." -ForegroundColor White
-Write-Host ""
+#>
 
-# --- Input paths ---
-do {
-    Write-Host "Please enter the full path to the FIRST profile folder:" -ForegroundColor Yellow
-    Write-Host "Example: C:\Users\YourName\.minecraft\profiles\MyProfile" -ForegroundColor Gray
-    $Cesta1 = Read-Host "Path1"
+#region --- Safety: offer a temporary Execution Policy bypass ---
+function Ensure-ExecutionPolicyBypass {
+    <#
+      .SYNOPSIS
+        Offers to relaunch the script with -ExecutionPolicy Bypass (process scope only).
+      .NOTES
+        We set an env flag to avoid infinite relaunch loops.
+    #>
 
-    if (-not (Test-Path -LiteralPath $Cesta1)) {
-        Write-Host "ERROR: Path does not exist!" -ForegroundColor Red
-        Write-Host ""
-    }
-} while (-not (Test-Path -LiteralPath $Cesta1))
+    # If we've already relaunched with bypass, do nothing.
+    if ($env:__EP_BYPASS -eq '1') { return }
 
-do {
-    Write-Host ""
-    Write-Host "Please enter the full path to the SECOND profile folder:" -ForegroundColor Yellow
-    Write-Host "Example: C:\Users\YourName\.minecraft\profiles\MyOtherProfile" -ForegroundColor Gray
-    $Cesta2 = Read-Host "Path2"
+    # Determine the *effective* policy (this is informational for the user).
+    $effectivePolicy = Get-ExecutionPolicy -List | Sort-Object Scope | Select-Object -Last 1 -ExpandProperty ExecutionPolicy
+    Write-Host "Current effective Execution Policy: $effectivePolicy" -ForegroundColor Yellow
 
-    if (-not (Test-Path -LiteralPath $Cesta2)) {
-        Write-Host "Path doesn't exist. Creating it..." -ForegroundColor Yellow
-        try {
-            New-Item -Path $Cesta2 -ItemType Directory -Force | Out-Null
-            Write-Host "Created: $Cesta2" -ForegroundColor Green
-            break
+    # If policy might block scripts (e.g., Restricted/AllSigned), offer a bypass relaunch.
+    if ($effectivePolicy -in @('Restricted','AllSigned','RemoteSigned')) {
+        $answer = Read-Host "Do you want to temporarily bypass Execution Policy for this run only? (Y/N)"
+        if ($answer -match '^[Yy]') {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName  = (Get-Process -Id $PID).Path  # path to current pwsh.exe or powershell.exe
+            $args = @()
+            # Preserve console window (start in same console)
+            if ($PSCommandPath) {
+                $args += '-ExecutionPolicy','Bypass','-NoProfile','-File',"$PSCommandPath"
+            } else {
+                # If the script is dot-sourced, fall back to invoking via -Command with the content path
+                Write-Host "Warning: PSCommandPath is empty; attempting to relaunch using -Command." -ForegroundColor Yellow
+                $args += '-ExecutionPolicy','Bypass','-NoProfile','-Command',"& '$($MyInvocation.MyCommand.Path)'"
+            }
+            # Pass a sentinel env var to avoid relaunch loops
+            $psi.Arguments = ($args -join ' ')
+            $psi.UseShellExecute = $false
+            $psi.Environment['__EP_BYPASS'] = '1'
+
+            # Launch new process and exit current one
+            [void][System.Diagnostics.Process]::Start($psi)
+            Write-Host "Relaunching with a temporary Execution Policy bypass..." -ForegroundColor Green
+            exit
+        } else {
+            Write-Host "Proceeding without bypass. If execution fails due to policy, rerun and choose 'Y'." -ForegroundColor Yellow
         }
-        catch {
-            Write-Host "ERROR: Could not create folder: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host ""
-        }
-    } else {
-        break
     }
-} while ($true)
-
-Write-Host ""
-Write-Host "Analyzing folders to determine source and destination..." -ForegroundColor Yellow
-
-# --- Detection function for "old" profile ---
-function Test-OldProfile {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Path
-    )
-    $SavesPath  = Join-Path $Path "saves"
-    $FabricPath = Join-Path $Path ".fabric"
-    return (Test-Path -LiteralPath $SavesPath) -or (Test-Path -LiteralPath $FabricPath)
 }
+Ensure-ExecutionPolicyBypass
+#endregion
 
-$Cesta1IsOld = Test-OldProfile -Path $Cesta1
-$Cesta2IsOld = Test-OldProfile -Path $Cesta2
-
-# --- Decide Source/Destination ---
-$SourcePath = $null
-$DestinationPath = $null
-
-if ($Cesta1IsOld -and $Cesta2IsOld) {
-    Write-Host "ERROR: Both folders appear to be old profiles (both contain 'saves' or '.fabric')!" -ForegroundColor Red
-    Write-Host "Please specify one old profile and one new profile." -ForegroundColor Red
-    Write-Host ""
-    [void](Read-Host "Press Enter to exit")
-    exit 1
-}
-elseif (-not $Cesta1IsOld -and -not $Cesta2IsOld) {
-    Write-Host "WARNING: Neither folder appears to be an old profile (neither contains 'saves' or '.fabric')!" -ForegroundColor Yellow
-    Write-Host "Assuming FIRST path is source and SECOND is destination." -ForegroundColor Yellow
-    $SourcePath = $Cesta1
-    $DestinationPath = $Cesta2
-}
-elseif ($Cesta1IsOld) {
-    $SourcePath = $Cesta1
-    $DestinationPath = $Cesta2
-}
-else {
-    $SourcePath = $Cesta2
-    $DestinationPath = $Cesta1
-}
-
-Write-Host ""
-Write-Host "$tick Source (OLD profile): $SourcePath" -ForegroundColor Green
-Write-Host "$tick Destination (NEW profile): $DestinationPath" -ForegroundColor Green
-Write-Host ""
-
-# --- Items to copy ---
+#region --- Helpers: copy logic & utilities ---
 $ItemsToCopy = @(
     "Distant_Horizons_server_data",
     "config",
@@ -109,88 +84,216 @@ $ItemsToCopy = @(
     "options.txt"
 )
 
-# --- Check which items exist in source ---
-Write-Host "Checking source items..." -ForegroundColor Yellow
-$ExistingItems = New-Object System.Collections.Generic.List[string]
+function Test-IsDirectory {
+    param([string]$Path)
+    return (Test-Path -LiteralPath $Path -PathType Container)
+}
+function Test-IsFile {
+    param([string]$Path)
+    return (Test-Path -LiteralPath $Path -PathType Leaf)
+}
 
-foreach ($Item in $ItemsToCopy) {
-    $ItemPath = Join-Path $SourcePath $Item
-    if (Test-Path -LiteralPath $ItemPath) {
-        [void]$ExistingItems.Add($Item)
-        if (Test-Path -LiteralPath $ItemPath -PathType Container) {
-            Write-Host "  $tick $Item (folder)" -ForegroundColor Green
-        } else {
-            Write-Host "  $tick $Item (file)" -ForegroundColor Green
+function Copy-ItemSmart {
+    <#
+      .SYNOPSIS
+        Copies a folder/file from Source to Dest with robust behavior.
+      .DESCRIPTION
+        - For directories: uses ROBOCOPY to merge contents (mirrors *additions/updates* but does not delete destination files).
+        - For single files (e.g., options.txt): uses Copy-Item with overwrite.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$DestPath
+    )
+
+    if (Test-IsDirectory $SourcePath) {
+        if (-not (Test-Path -LiteralPath $DestPath)) {
+            New-Item -ItemType Directory -Path $DestPath | Out-Null
         }
-    } else {
-        Write-Host "  $cross $Item (not found)" -ForegroundColor DarkGray
+
+        # /E -> include subdirs, including empty
+        # /XO -> exclude older files (only copy newer)
+        # /R:2 /W:2 -> sane retries
+        # /NFL /NDL -> cleaner output
+        # /NP -> no progress (less spam), still shows summary
+        $robocopyArgs = @(
+            "`"$SourcePath`"", "`"$DestPath`"", "/E", "/XO", "/R:2", "/W:2", "/NFL", "/NDL", "/NP"
+        )
+
+        Write-Host "Robocopy: $SourcePath -> $DestPath" -ForegroundColor Cyan
+        $result = & robocopy @robocopyArgs
+        # Robocopy uses exit codes, but 0-7 are typically "successful" or "copied with some differences"
+        $rc = $LASTEXITCODE
+        if ($rc -gt 7) {
+            Write-Warning "Robocopy reported a critical error (exit code $rc) while copying '$SourcePath'."
+        }
+    }
+    elseif (Test-IsFile $SourcePath) {
+        $destDir = Split-Path -Parent $DestPath
+        if (-not (Test-Path -LiteralPath $destDir)) {
+            New-Item -ItemType Directory -Path $destDir | Out-Null
+        }
+        Write-Host "Copy-Item: $SourcePath -> $DestPath (overwrite)" -ForegroundColor Cyan
+        Copy-Item -LiteralPath $SourcePath -Destination $DestPath -Force
+    }
+    else {
+        Write-Host "Skip (missing): $SourcePath" -ForegroundColor DarkYellow
     }
 }
 
-if ($ExistingItems.Count -eq 0) {
-    Write-Host ""
-    Write-Host "ERROR: No items to copy found in source profile!" -ForegroundColor Red
-    [void](Read-Host "Press Enter to exit")
+function Copy-ProfileAssets {
+    <#
+      .SYNOPSIS
+        Copies the predefined $ItemsToCopy from $OldProfileRoot to $NewProfileRoot.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$OldProfileRoot,
+        [Parameter(Mandatory)][string]$NewProfileRoot
+    )
+
+    Write-Host "`n== Copying selected items from:" -ForegroundColor Green
+    Write-Host "   OLD: $OldProfileRoot" -ForegroundColor Gray
+    Write-Host "   NEW: $NewProfileRoot`n" -ForegroundColor Gray
+
+    foreach ($item in $ItemsToCopy) {
+        $src = Join-Path -Path $OldProfileRoot -ChildPath $item
+        $dst = Join-Path -Path $NewProfileRoot -ChildPath $item
+        Copy-ItemSmart -SourcePath $src -DestPath $dst
+    }
+
+    Write-Host "`nDone. Review the output above for any warnings." -ForegroundColor Green
+}
+#endregion
+
+#region --- Launcher selection ---
+Write-Host "Select the launcher:" -ForegroundColor White
+Write-Host "  1) Modrinth" -ForegroundColor White
+Write-Host "  2) SkLauncher" -ForegroundColor White
+$launcherChoice = Read-Host "Enter 1 or 2"
+#endregion
+
+#region --- Modrinth flow ---
+if ($launcherChoice -eq '1') {
+    Write-Host "`n== Modrinth selected ==" -ForegroundColor Green
+
+    # Use %APPDATA% for current user; ModrinthApp stores its profiles here:
+    $modrinthProfilesRoot = Join-Path -Path $env:APPDATA -ChildPath "ModrinthApp\profiles"
+    if (-not (Test-Path -LiteralPath $modrinthProfilesRoot)) {
+        Write-Error "Profiles folder not found: $modrinthProfilesRoot"
+        exit 1
+    }
+
+    # Find all profile directories containing "Serverus Maximus"
+    $allProfiles = Get-ChildItem -LiteralPath $modrinthProfilesRoot -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -like '*Serverus Maximus*' }
+
+    if (-not $allProfiles -or $allProfiles.Count -eq 0) {
+        Write-Error "No profiles matching '*Serverus Maximus*' were found in: $modrinthProfilesRoot"
+        exit 1
+    }
+
+    # Identify OLD vs NEW based on folder name containing "1.0.0"
+    $oldCandidates = $allProfiles | Where-Object { $_.Name -like '*1.0.0*' }
+    $newCandidates = $allProfiles | Where-Object { $_.Name -notlike '*1.0.0*' }
+
+    if ($oldCandidates.Count -eq 0) {
+        Write-Error "Could not find a source (OLD) profile containing '1.0.0' in its name."
+        Write-Host "Profiles found:" -ForegroundColor Yellow
+        $allProfiles | ForEach-Object { Write-Host " - $($_.FullName)" }
+        exit 1
+    }
+    if ($newCandidates.Count -eq 0) {
+        Write-Error "Could not find a destination (NEW) profile WITHOUT '1.0.0' in its name."
+        Write-Host "Profiles found:" -ForegroundColor Yellow
+        $allProfiles | ForEach-Object { Write-Host " - $($_.FullName)" }
+        exit 1
+    }
+
+    # If multiple candidates exist, let user select each explicitly.
+    function Select-FromList {
+        param(
+            [Parameter(Mandatory)][string]$Prompt,
+            [Parameter(Mandatory)][object[]]$Items
+        )
+        Write-Host $Prompt -ForegroundColor White
+        for ($i=0; $i -lt $Items.Count; $i++) {
+            Write-Host ("  [{0}] {1}" -f ($i+1), $Items[$i].FullName) -ForegroundColor Gray
+        }
+        $sel = [int](Read-Host "Choose 1..$($Items.Count)")
+        if ($sel -lt 1 -or $sel -gt $Items.Count) { throw "Invalid selection." }
+        return $Items[$sel-1]
+    }
+
+    $oldProfile = if ($oldCandidates.Count -gt 1) { 
+        Select-FromList -Prompt "Multiple OLD candidates found (contain '1.0.0'). Select one:" -Items $oldCandidates
+    } else { $oldCandidates[0] }
+
+    $newProfile = if ($newCandidates.Count -gt 1) { 
+        Select-FromList -Prompt "Multiple NEW candidates found (do NOT contain '1.0.0'). Select one:" -Items $newCandidates
+    } else { $newCandidates[0] }
+
+    Copy-ProfileAssets -OldProfileRoot $oldProfile.FullName -NewProfileRoot $newProfile.FullName
+    exit 0
+}
+#endregion
+
+#region --- SkLauncher flow ---
+elseif ($launcherChoice -eq '2') {
+    Write-Host "`n== SkLauncher selected ==" -ForegroundColor Green
+    Write-Host "Please paste two absolute profile paths. Example format:" -ForegroundColor Gray
+    Write-Host '  C:\Users\<User>\AppData\Roaming\.minecraft\modpacks\eb446744-5ce8-3cc7-b270-eefda823eddf' -ForegroundColor Gray
+
+    $path1 = Read-Host "Path 1"
+    $path2 = Read-Host "Path 2"
+
+    foreach ($p in @($path1,$path2)) {
+        if (-not (Test-Path -LiteralPath $p -PathType Container)) {
+            Write-Error "Path not found or not a folder: $p"
+            exit 1
+        }
+    }
+
+    # Per your instruction:
+    #   * If a profile path DOES NOT contain a ".fabric" folder → it's considered the OLD profile.
+    #   * If it DOES contain ".fabric" → it's considered the NEW profile.
+    function Has-FabricFolder {
+        param([string]$Root)
+        return (Test-Path -LiteralPath (Join-Path $Root '.fabric') -PathType Container)
+    }
+
+    $p1HasFabric = Has-FabricFolder -Root $path1
+    $p2HasFabric = Has-FabricFolder -Root $path2
+
+    if (-not $p1HasFabric -and $p2HasFabric) {
+        $oldProfileRoot = $path1
+        $newProfileRoot = $path2
+    }
+    elseif (-not $p2HasFabric -and $p1HasFabric) {
+        $oldProfileRoot = $path2
+        $newProfileRoot = $path1s
+    }
+    elseif (-not $p1HasFabric -and -not $p2HasFabric) {
+        Write-Host "`nBoth paths LACK '.fabric' → both look like OLD profiles per the rule." -ForegroundColor Yellow
+        Write-Host "You'll need to decide which one should be treated as NEW (destination)." -ForegroundColor Yellow
+        $choose = Read-Host "Type '1' if Path1 is OLD (copy FROM Path1 TO Path2), or '2' if Path2 is OLD (copy FROM Path2 TO Path1)"
+        if ($choose -eq '1') { $oldProfileRoot = $path1; $newProfileRoot = $path2 }
+        elseif ($choose -eq '2') { $oldProfileRoot = $path2; $newProfileRoot = $path1 }
+        else { Write-Error "Invalid choice."; exit 1 }
+    }
+    else {
+        Write-Host "`nBoth paths CONTAIN '.fabric' → both look like NEW profiles per the rule." -ForegroundColor Yellow
+        $choose = Read-Host "Type '1' to treat Path1 as OLD (copy FROM Path1 TO Path2), or '2' to treat Path2 as OLD (copy FROM Path2 TO Path1)"
+        if ($choose -eq '1') { $oldProfileRoot = $path1; $newProfileRoot = $path2 }
+        elseif ($choose -eq '2') { $oldProfileRoot = $path2; $newProfileRoot = $path1 }
+        else { Write-Error "Invalid choice."; exit 1 }
+    }
+
+    Copy-ProfileAssets -OldProfileRoot $oldProfileRoot -NewProfileRoot $newProfileRoot
+    exit 0
+}
+#endregion
+
+else {
+    Write-Error "Invalid selection. Please run the script again and choose 1 or 2."
     exit 1
 }
-
-Write-Host ""
-Write-Host "Found $($ExistingItems.Count) item(s) to copy." -ForegroundColor Cyan
-
-# --- Warning if destination is not empty ---
-$ExistingContent = @(Get-ChildItem -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue)
-if ($ExistingContent.Count -gt 0) {
-    Write-Host ""
-    Write-Host "WARNING: Destination folder contains existing files!" -ForegroundColor Yellow
-    Write-Host "Existing items will be overwritten." -ForegroundColor Yellow
-    Write-Host ""
-    $Confirm = Read-Host "Do you want to continue? (y/N)"
-    if ($Confirm -notin @("y","Y")) {
-        Write-Host "Operation cancelled." -ForegroundColor Yellow
-        exit 0
-    }
-}
-
-Write-Host ""
-Write-Host "Starting copy operation..." -ForegroundColor Cyan
-Write-Host ""
-
-$CopiedCount = 0
-$ErrorCount  = 0
-
-foreach ($Item in $ExistingItems) {
-    $SourceItemPath = Join-Path $SourcePath $Item
-    $DestItemPath   = Join-Path $DestinationPath $Item
-
-    try {
-        Write-Host ("Copying {0}..." -f $Item) -ForegroundColor Yellow -NoNewline
-
-        if (Test-Path -LiteralPath $SourceItemPath -PathType Container) {
-            # It's a folder – remove destination if exists, then copy recursively
-            if (Test-Path -LiteralPath $DestItemPath) {
-                Remove-Item -LiteralPath $DestItemPath -Recurse -Force -ErrorAction Stop
-            }
-            Copy-Item -LiteralPath $SourceItemPath -Destination $DestItemPath -Recurse -Force -ErrorAction Stop
-        } else {
-            # It's a file
-            Copy-Item -LiteralPath $SourceItemPath -Destination $DestItemPath -Force -ErrorAction Stop
-        }
-
-        Write-Host " $tick" -ForegroundColor Green
-        $CopiedCount++
-    }
-    catch {
-        Write-Host ""
-        Write-Host "ERROR copying '$Item': $($_.Exception.Message)" -ForegroundColor Red
-        $ErrorCount++
-    }
-}
-
-Write-Host ""
-Write-Host "Copy Operation Complete" -ForegroundColor Cyan
-Write-Host "Successfully copied: $CopiedCount item(s)" -ForegroundColor Green
-if ($ErrorCount -gt 0) {
-    Write-Host "Errors: $ErrorCount item(s)" -ForegroundColor Red
-}
-Write-Host "Done!" -ForegroundColor Green
-[void](Read-Host "Press Enter to exit")
