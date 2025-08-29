@@ -7,7 +7,7 @@
   - Supports two launchers with different discovery flows:
       1) Modrinth: finds profiles containing "Serverus Maximus" and determines source/destination by the presence of "1.0.0" in the folder name.
       2) SkLauncher: asks the user for two absolute paths; decides which is OLD vs NEW by checking for the ".fabric" folder.
-         NOTE (as per request): If a profile path DOES NOT contain a ".fabric" folder, it's considered the OLD profile.
+         UPDATED RULE: If a profile path CONTAINS a ".fabric" folder, it's considered the OLD profile.
   - Copies these items: 
         "Distant_Horizons_server_data", "config", "saves", "schematics",
         "xaero", "shaderpacks", "resourcepacks", "options.txt"
@@ -33,34 +33,27 @@ function Ensure-ExecutionPolicyBypass {
         We set an env flag to avoid infinite relaunch loops.
     #>
 
-    # If we've already relaunched with bypass, do nothing.
     if ($env:__EP_BYPASS -eq '1') { return }
 
-    # Determine the *effective* policy (this is informational for the user).
     $effectivePolicy = Get-ExecutionPolicy -List | Sort-Object Scope | Select-Object -Last 1 -ExpandProperty ExecutionPolicy
     Write-Host "Current effective Execution Policy: $effectivePolicy" -ForegroundColor Yellow
 
-    # If policy might block scripts (e.g., Restricted/AllSigned), offer a bypass relaunch.
     if ($effectivePolicy -in @('Restricted','AllSigned','RemoteSigned')) {
         $answer = Read-Host "Do you want to temporarily bypass Execution Policy for this run only? (Y/N)"
         if ($answer -match '^[Yy]') {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName  = (Get-Process -Id $PID).Path  # path to current pwsh.exe or powershell.exe
+            $psi.FileName  = (Get-Process -Id $PID).Path
             $args = @()
-            # Preserve console window (start in same console)
             if ($PSCommandPath) {
                 $args += '-ExecutionPolicy','Bypass','-NoProfile','-File',"$PSCommandPath"
             } else {
-                # If the script is dot-sourced, fall back to invoking via -Command with the content path
                 Write-Host "Warning: PSCommandPath is empty; attempting to relaunch using -Command." -ForegroundColor Yellow
                 $args += '-ExecutionPolicy','Bypass','-NoProfile','-Command',"& '$($MyInvocation.MyCommand.Path)'"
             }
-            # Pass a sentinel env var to avoid relaunch loops
             $psi.Arguments = ($args -join ' ')
             $psi.UseShellExecute = $false
             $psi.Environment['__EP_BYPASS'] = '1'
 
-            # Launch new process and exit current one
             [void][System.Diagnostics.Process]::Start($psi)
             Write-Host "Relaunching with a temporary Execution Policy bypass..." -ForegroundColor Green
             exit
@@ -84,22 +77,13 @@ $ItemsToCopy = @(
     "options.txt"
 )
 
-function Test-IsDirectory {
-    param([string]$Path)
-    return (Test-Path -LiteralPath $Path -PathType Container)
-}
-function Test-IsFile {
-    param([string]$Path)
-    return (Test-Path -LiteralPath $Path -PathType Leaf)
-}
+function Test-IsDirectory { param([string]$Path) return (Test-Path -LiteralPath $Path -PathType Container) }
+function Test-IsFile      { param([string]$Path) return (Test-Path -LiteralPath $Path -PathType Leaf) }
 
 function Copy-ItemSmart {
     <#
       .SYNOPSIS
         Copies a folder/file from Source to Dest with robust behavior.
-      .DESCRIPTION
-        - For directories: uses ROBOCOPY to merge contents (mirrors *additions/updates* but does not delete destination files).
-        - For single files (e.g., options.txt): uses Copy-Item with overwrite.
     #>
     param(
         [Parameter(Mandatory)][string]$SourcePath,
@@ -110,29 +94,17 @@ function Copy-ItemSmart {
         if (-not (Test-Path -LiteralPath $DestPath)) {
             New-Item -ItemType Directory -Path $DestPath | Out-Null
         }
-
-        # /E -> include subdirs, including empty
-        # /XO -> exclude older files (only copy newer)
-        # /R:2 /W:2 -> sane retries
-        # /NFL /NDL -> cleaner output
-        # /NP -> no progress (less spam), still shows summary
         $robocopyArgs = @(
             "`"$SourcePath`"", "`"$DestPath`"", "/E", "/XO", "/R:2", "/W:2", "/NFL", "/NDL", "/NP"
         )
-
         Write-Host "Robocopy: $SourcePath -> $DestPath" -ForegroundColor Cyan
         $result = & robocopy @robocopyArgs
-        # Robocopy uses exit codes, but 0-7 are typically "successful" or "copied with some differences"
         $rc = $LASTEXITCODE
-        if ($rc -gt 7) {
-            Write-Warning "Robocopy reported a critical error (exit code $rc) while copying '$SourcePath'."
-        }
+        if ($rc -gt 7) { Write-Warning "Robocopy reported a critical error (exit code $rc) while copying '$SourcePath'." }
     }
     elseif (Test-IsFile $SourcePath) {
         $destDir = Split-Path -Parent $DestPath
-        if (-not (Test-Path -LiteralPath $destDir)) {
-            New-Item -ItemType Directory -Path $destDir | Out-Null
-        }
+        if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir | Out-Null }
         Write-Host "Copy-Item: $SourcePath -> $DestPath (overwrite)" -ForegroundColor Cyan
         Copy-Item -LiteralPath $SourcePath -Destination $DestPath -Force
     }
@@ -176,14 +148,12 @@ $launcherChoice = Read-Host "Enter 1 or 2"
 if ($launcherChoice -eq '1') {
     Write-Host "`n== Modrinth selected ==" -ForegroundColor Green
 
-    # Use %APPDATA% for current user; ModrinthApp stores its profiles here:
     $modrinthProfilesRoot = Join-Path -Path $env:APPDATA -ChildPath "ModrinthApp\profiles"
     if (-not (Test-Path -LiteralPath $modrinthProfilesRoot)) {
         Write-Error "Profiles folder not found: $modrinthProfilesRoot"
         exit 1
     }
 
-    # Find all profile directories containing "Serverus Maximus"
     $allProfiles = Get-ChildItem -LiteralPath $modrinthProfilesRoot -Directory -ErrorAction SilentlyContinue |
                    Where-Object { $_.Name -like '*Serverus Maximus*' }
 
@@ -192,7 +162,6 @@ if ($launcherChoice -eq '1') {
         exit 1
     }
 
-    # Identify OLD vs NEW based on folder name containing "1.0.0"
     $oldCandidates = $allProfiles | Where-Object { $_.Name -like '*1.0.0*' }
     $newCandidates = $allProfiles | Where-Object { $_.Name -notlike '*1.0.0*' }
 
@@ -209,7 +178,6 @@ if ($launcherChoice -eq '1') {
         exit 1
     }
 
-    # If multiple candidates exist, let user select each explicitly.
     function Select-FromList {
         param(
             [Parameter(Mandatory)][string]$Prompt,
@@ -237,7 +205,7 @@ if ($launcherChoice -eq '1') {
 }
 #endregion
 
-#region --- SkLauncher flow ---
+#region --- SkLauncher flow (UPDATED RULE: .fabric => OLD) ---
 elseif ($launcherChoice -eq '2') {
     Write-Host "`n== SkLauncher selected ==" -ForegroundColor Green
     Write-Host "Please paste two absolute profile paths. Example format:" -ForegroundColor Gray
@@ -253,36 +221,32 @@ elseif ($launcherChoice -eq '2') {
         }
     }
 
-    # Per your instruction:
-    #   * If a profile path DOES NOT contain a ".fabric" folder → it's considered the OLD profile.
-    #   * If it DOES contain ".fabric" → it's considered the NEW profile.
-    function Has-FabricFolder {
-        param([string]$Root)
-        return (Test-Path -LiteralPath (Join-Path $Root '.fabric') -PathType Container)
-    }
+    function Has-FabricFolder { param([string]$Root) return (Test-Path -LiteralPath (Join-Path $Root '.fabric') -PathType Container) }
 
     $p1HasFabric = Has-FabricFolder -Root $path1
     $p2HasFabric = Has-FabricFolder -Root $path2
 
-    if (-not $p1HasFabric -and $p2HasFabric) {
+    # UPDATED LOGIC:
+    # If a path CONTAINS '.fabric' => it's the OLD profile.
+    if ($p1HasFabric -and -not $p2HasFabric) {
         $oldProfileRoot = $path1
         $newProfileRoot = $path2
     }
-    elseif (-not $p2HasFabric -and $p1HasFabric) {
+    elseif ($p2HasFabric -and -not $p1HasFabric) {
         $oldProfileRoot = $path2
-        $newProfileRoot = $path1s
+        $newProfileRoot = $path1
     }
-    elseif (-not $p1HasFabric -and -not $p2HasFabric) {
-        Write-Host "`nBoth paths LACK '.fabric' → both look like OLD profiles per the rule." -ForegroundColor Yellow
-        Write-Host "You'll need to decide which one should be treated as NEW (destination)." -ForegroundColor Yellow
-        $choose = Read-Host "Type '1' if Path1 is OLD (copy FROM Path1 TO Path2), or '2' if Path2 is OLD (copy FROM Path2 TO Path1)"
+    elseif ($p1HasFabric -and $p2HasFabric) {
+        Write-Host "`nBoth paths CONTAIN '.fabric' → both look like OLD profiles per the rule." -ForegroundColor Yellow
+        $choose = Read-Host "Type '1' to treat Path1 as OLD (copy FROM Path1 TO Path2), or '2' to treat Path2 as OLD (copy FROM Path2 TO Path1)"
         if ($choose -eq '1') { $oldProfileRoot = $path1; $newProfileRoot = $path2 }
         elseif ($choose -eq '2') { $oldProfileRoot = $path2; $newProfileRoot = $path1 }
         else { Write-Error "Invalid choice."; exit 1 }
     }
     else {
-        Write-Host "`nBoth paths CONTAIN '.fabric' → both look like NEW profiles per the rule." -ForegroundColor Yellow
-        $choose = Read-Host "Type '1' to treat Path1 as OLD (copy FROM Path1 TO Path2), or '2' to treat Path2 as OLD (copy FROM Path2 TO Path1)"
+        # neither path has '.fabric' → both look like NEW profiles per the rule, user must choose which to treat as OLD
+        Write-Host "`nNeither path contains '.fabric' → both look like NEW profiles per the rule." -ForegroundColor Yellow
+        $choose = Read-Host "Type '1' if Path1 should be treated as OLD (copy FROM Path1 TO Path2), or '2' if Path2 should be treated as OLD (copy FROM Path2 TO Path1)"
         if ($choose -eq '1') { $oldProfileRoot = $path1; $newProfileRoot = $path2 }
         elseif ($choose -eq '2') { $oldProfileRoot = $path2; $newProfileRoot = $path1 }
         else { Write-Error "Invalid choice."; exit 1 }
